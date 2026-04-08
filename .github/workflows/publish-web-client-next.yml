@@ -1,17 +1,59 @@
-# TEST WORKFLOW: publish under @jeresalo scope to validate the pipeline.
-# Triggered manually via workflow_dispatch.
+# This workflow publishes the web-client (with Node.js platform binaries) and
+# react-sdk packages to npm if a patch release label is applied to the PR and
+# the corresponding package.json version is bumped.
 
-name: Test Publish Web Client SDK
+name: Publish Web Client SDK to NPM on Next
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - next
+    types:
+      - closed
 
 permissions:
   contents: read
 
 jobs:
+  check-version:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'patch release'))
+    runs-on: ubuntu-24.04
+    outputs:
+      should_publish_web: ${{ steps.check_web_version.outputs.should_publish || steps.dispatch_defaults.outputs.should_publish }}
+      web_version: ${{ steps.check_web_version.outputs.current_version || steps.dispatch_defaults.outputs.current_version }}
+      should_publish_react: ${{ steps.check_react_version.outputs.should_publish || steps.dispatch_defaults.outputs.should_publish }}
+      react_version: ${{ steps.check_react_version.outputs.current_version || steps.dispatch_defaults.outputs.current_version }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set defaults for workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: dispatch_defaults
+        run: |
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          echo "current_version=$(jq -r '.version' crates/web-client/package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify web-client version bump against next
+        if: github.event_name != 'workflow_dispatch'
+        id: check_web_version
+        run: ./scripts/check-web-client-version-pr.sh "${{ github.event.pull_request.base.sha }}"
+
+      - name: Verify react-sdk version bump against next
+        if: github.event_name != 'workflow_dispatch'
+        id: check_react_version
+        run: ./scripts/check-react-sdk-version-pr.sh "${{ github.event.pull_request.base.sha }}"
+
   # Build native Node.js binaries for each platform
   build-native-nodejs:
+    needs: check-version
+    if: needs.check-version.outputs.should_publish_web == 'true'
     strategy:
       matrix:
         include:
@@ -43,6 +85,7 @@ jobs:
           else
             EXT="so"
           fi
+          # Find the binary (may be in target/release/ or target/<triple>/release/)
           BINARY=$(find target -name "libmiden_client_web.${EXT}" -path "*/release/*" | head -1)
           if [ -z "$BINARY" ]; then
             echo "Binary not found"
@@ -56,13 +99,18 @@ jobs:
           name: ${{ matrix.platform-package }}
           path: packages/${{ matrix.platform-package }}/miden_client_web.node
 
-  # Publish all packages to npm under @jeresalo scope
+  # Publish all packages to npm
   publish:
-    needs: [build-native-nodejs]
+    needs: [check-version, build-native-nodejs]
+    if: >
+      !cancelled() &&
+      needs.check-version.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -84,20 +132,21 @@ jobs:
 
       # ── Publish Node.js platform packages ──
       - name: Download native binary artifacts
-        if: needs.build-native-nodejs.result == 'success'
+        if: needs.check-version.outputs.should_publish_web == 'true' && needs.build-native-nodejs.result == 'success'
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - name: Sync platform package versions and publish
-        if: needs.build-native-nodejs.result == 'success'
+        if: needs.check-version.outputs.should_publish_web == 'true' && needs.build-native-nodejs.result == 'success'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           WEB_VERSION=$(jq -r '.version' crates/web-client/package.json)
           for pkg in node-sdk-darwin-arm64 node-sdk-darwin-x64 node-sdk-linux-x64-gnu; do
             cp "artifacts/${pkg}/miden_client_web.node" "packages/${pkg}/miden_client_web.node"
-            jq --arg v "$WEB_VERSION" '.version = $v | .name = "@jeresalo/" + (.name | split("/")[1])' "packages/${pkg}/package.json" > /tmp/pkg.json
+            # Sync version with web-client
+            jq --arg v "$WEB_VERSION" '.version = $v' "packages/${pkg}/package.json" > /tmp/pkg.json
             mv /tmp/pkg.json "packages/${pkg}/package.json"
             echo "Publishing @jeresalo/${pkg}@${WEB_VERSION}..."
             cd "packages/${pkg}"
@@ -107,30 +156,32 @@ jobs:
 
       # ── Build and publish web-client ──
       - name: Install & build web-client
+        if: needs.check-version.outputs.should_publish_web == 'true' || needs.check-version.outputs.should_publish_react == 'true'
         run: |
           cd crates/web-client
           yarn install --frozen-lockfile
           yarn build
 
-      - name: Rename package and inject Node.js optionalDependencies
-        if: needs.build-native-nodejs.result == 'success'
+      - name: Inject Node.js optionalDependencies before publish
+        if: needs.check-version.outputs.should_publish_web == 'true' && needs.build-native-nodejs.result == 'success'
         run: |
           cd crates/web-client
           node -e "
             const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
             const v = pkg.version;
-            pkg.name = '@jeresalo/miden-sdk';
             pkg.optionalDependencies = {
               '@jeresalo/node-darwin-arm64': v,
               '@jeresalo/node-darwin-x64': v,
               '@jeresalo/node-linux-x64-gnu': v,
             };
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-            console.log('Renamed to @jeresalo/miden-sdk, injected optionalDependencies with version ' + v);
+            console.log('Injected optionalDependencies with version ' + v);
           "
 
-      - name: Rename package (fallback if no native binaries)
-        if: needs.build-native-nodejs.result != 'success'
+      - name: Publish web-client to npm
+        if: needs.check-version.outputs.should_publish_web == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd crates/web-client
           node -e "
@@ -138,14 +189,42 @@ jobs:
             pkg.name = '@jeresalo/miden-sdk';
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
+          npm publish --tag test --access public
 
-      - name: Publish web-client to npm
+      # ── Build and publish react-sdk ──
+      - name: Install & build react-sdk
+        if: needs.check-version.outputs.should_publish_react == 'true'
+        run: |
+          cd packages/react-sdk
+          yarn install --frozen-lockfile
+          yarn build
+
+      - name: Publish react-sdk to npm
+        if: needs.check-version.outputs.should_publish_react == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
-          cd crates/web-client
+          cd packages/react-sdk
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = '@jeresalo/react';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
           npm publish --tag test --access public
 
       # ── Status ──
-      - name: Done
-        run: echo "Published @jeresalo packages with tag 'test'."
+      - name: Done (web-client)
+        if: needs.check-version.outputs.should_publish_web == 'true'
+        run: echo "Published @jeresalo/miden-sdk v${{ needs.check-version.outputs.web_version }} with Node.js platform binaries."
+
+      - name: Done (react-sdk)
+        if: needs.check-version.outputs.should_publish_react == 'true'
+        run: echo "Published @jeresalo/react v${{ needs.check-version.outputs.react_version }}."
+
+      - name: Skipped (web-client)
+        if: needs.check-version.outputs.should_publish_web != 'true'
+        run: echo "Web-client publish skipped (no version bump)."
+
+      - name: Skipped (react-sdk)
+        if: needs.check-version.outputs.should_publish_react != 'true'
+        run: echo "React SDK publish skipped (no version bump)."

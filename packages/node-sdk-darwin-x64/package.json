@@ -1,5 +1,5 @@
 {
-  "name": "@miden-sdk/node-darwin-x64",
+  "name": "@jeresalo/node-darwin-x64",
   "version": "0.14.0-alpha.1",
   "description": "Miden Client SDK native module for macOS x64 (Intel)",
   "os": [
