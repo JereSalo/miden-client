@@ -4,6 +4,7 @@
 name: Publish Web Client SDK to NPM on Next
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - next
@@ -16,8 +17,9 @@ permissions:
 jobs:
   publish:
     if: >
-      github.event.pull_request.merged == true &&
-      contains(github.event.pull_request.labels.*.name, 'patch release')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'patch release'))
     runs-on: ubuntu-24.04
 
     steps:
@@ -34,70 +36,85 @@ jobs:
           registry-url: 'https://registry.npmjs.org/'
 
       - name: Set up Rust and wasm target
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
-          override: true
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
           components: rust-src
 
       - name: Install binaryen (wasm-opt)
         run: |
           sudo apt-get update && sudo apt-get install -y binaryen
 
+      - name: Set defaults for workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: dispatch_defaults
+        run: |
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+
       - name: Verify web-client version bump against next
+        if: github.event_name != 'workflow_dispatch'
         id: check_web_version
         run: ./scripts/check-web-client-version-pr.sh "${{ github.event.pull_request.base.sha }}"
 
       - name: Verify react-sdk version bump against next
+        if: github.event_name != 'workflow_dispatch'
         id: check_react_version
         run: ./scripts/check-react-sdk-version-pr.sh "${{ github.event.pull_request.base.sha }}"
 
       - name: Install & build web-client
-        if: steps.check_web_version.outputs.should_publish == 'true' || steps.check_react_version.outputs.should_publish == 'true'
+        if: steps.dispatch_defaults.outputs.should_publish == 'true' || steps.check_web_version.outputs.should_publish == 'true' || steps.check_react_version.outputs.should_publish == 'true'
         run: |
           cd crates/web-client
           yarn install --frozen-lockfile
           yarn build
 
       - name: Publish to npm
-        if: steps.check_web_version.outputs.should_publish == 'true'
+        if: steps.dispatch_defaults.outputs.should_publish == 'true' || steps.check_web_version.outputs.should_publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd crates/web-client
-          npm publish --tag next
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = '@jeresalo/miden-sdk';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --tag test --access public
 
       - name: Install & build react-sdk
-        if: steps.check_react_version.outputs.should_publish == 'true'
+        if: steps.dispatch_defaults.outputs.should_publish == 'true' || steps.check_react_version.outputs.should_publish == 'true'
         run: |
           cd packages/react-sdk
           yarn install --frozen-lockfile
           yarn build
 
       - name: Publish react-sdk to npm
-        if: steps.check_react_version.outputs.should_publish == 'true'
+        if: steps.dispatch_defaults.outputs.should_publish == 'true' || steps.check_react_version.outputs.should_publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd packages/react-sdk
-          npm publish --tag next
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = '@jeresalo/react';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --tag test --access public
 
       - name: Done
-        if: steps.check_web_version.outputs.should_publish == 'true'
+        if: steps.dispatch_defaults.outputs.should_publish == 'true' || steps.check_web_version.outputs.should_publish == 'true'
         env:
           CURRENT_VERSION: ${{ steps.check_web_version.outputs.current_version }}
         run: echo "✅ Web-client published version $CURRENT_VERSION."
 
       - name: Done (react-sdk)
-        if: steps.check_react_version.outputs.should_publish == 'true'
+        if: steps.dispatch_defaults.outputs.should_publish == 'true' || steps.check_react_version.outputs.should_publish == 'true'
         env:
           CURRENT_VERSION: ${{ steps.check_react_version.outputs.current_version }}
         run: echo "✅ React SDK published version $CURRENT_VERSION."
 
       - name: Skipped publish
-        if: steps.check_web_version.outputs.should_publish != 'true'
+        if: steps.dispatch_defaults.outputs.should_publish != 'true' && steps.check_web_version.outputs.should_publish != 'true'
         env:
           SHOULD_PUBLISH: ${{ steps.check_web_version.outputs.should_publish }}
           CURRENT_VERSION: ${{ steps.check_web_version.outputs.current_version }}
@@ -108,7 +125,7 @@ jobs:
           fi
 
       - name: Skipped publish (react-sdk)
-        if: steps.check_react_version.outputs.should_publish != 'true'
+        if: steps.dispatch_defaults.outputs.should_publish != 'true' && steps.check_react_version.outputs.should_publish != 'true'
         env:
           SHOULD_PUBLISH: ${{ steps.check_react_version.outputs.should_publish }}
           CURRENT_VERSION: ${{ steps.check_react_version.outputs.current_version }}
