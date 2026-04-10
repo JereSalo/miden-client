@@ -35,11 +35,11 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org/'
 
-      - name: Set up Rust and wasm target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-          components: rust-src
+      - name: Install Rust toolchain
+        run: rustup update --no-self-update
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Install binaryen (wasm-opt)
         run: |
