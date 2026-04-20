@@ -117,10 +117,8 @@ jobs:
         with:
           path: artifacts
 
-      - name: Sync platform package versions and publish
+      - name: Sync platform package versions and pack (fork dry-run)
         if: needs.check-version.outputs.should_publish_web == 'true' && needs.build-native-nodejs.result == 'success'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           WEB_VERSION=$(jq -r '.version' crates/web-client/package.json)
           for pkg in node-sdk-darwin-arm64 node-sdk-darwin-x64 node-sdk-linux-x64-gnu; do
@@ -128,9 +126,9 @@ jobs:
             # Sync version with web-client
             jq --arg v "$WEB_VERSION" '.version = $v' "packages/${pkg}/package.json" > /tmp/pkg.json
             mv /tmp/pkg.json "packages/${pkg}/package.json"
-            echo "Publishing @miden-sdk/${pkg}@${WEB_VERSION}..."
+            echo "Packing @miden-sdk/${pkg}@${WEB_VERSION}..."
             cd "packages/${pkg}"
-            npm publish --access public
+            npm pack
             cd ../..
           done
 
@@ -170,13 +168,11 @@ jobs:
             console.log('Injected optionalDependencies with version ' + v);
           "
 
-      - name: Publish web-client to npm
+      - name: Pack web-client (fork dry-run)
         if: needs.check-version.outputs.should_publish_web == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd crates/web-client
-          npm publish
+          npm pack
 
       # ── Build and publish react-sdk ──
       - name: Install & build react-sdk
@@ -186,13 +182,11 @@ jobs:
           yarn install
           yarn build
 
-      - name: Publish react-sdk to npm
+      - name: Pack react-sdk (fork dry-run)
         if: needs.check-version.outputs.should_publish_react == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd packages/react-sdk
-          npm publish
+          npm pack
 
       # ── Build and publish vite-plugin ──
       - name: Install & build vite-plugin
@@ -202,13 +196,23 @@ jobs:
           yarn install
           yarn build
 
-      - name: Publish vite-plugin to npm
+      - name: Pack vite-plugin (fork dry-run)
         if: needs.check-version.outputs.should_publish_vite == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd packages/vite-plugin
-          npm publish
+          npm pack
+
+      # ── Upload all packed tarballs for inspection ──
+      - name: Upload packed tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-dry-run-tarballs
+          path: |
+            packages/node-sdk-*/miden-sdk-*.tgz
+            crates/web-client/miden-sdk-*.tgz
+            packages/react-sdk/miden-sdk-*.tgz
+            packages/vite-plugin/miden-sdk-*.tgz
+          if-no-files-found: warn
 
       # ── Status ──
       - name: Done (web-client)
