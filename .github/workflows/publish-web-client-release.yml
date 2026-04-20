@@ -117,8 +117,10 @@ jobs:
         with:
           path: artifacts
 
-      - name: Sync platform package versions and pack (fork dry-run)
+      - name: Sync platform package versions and publish
         if: needs.check-version.outputs.should_publish_web == 'true' && needs.build-native-nodejs.result == 'success'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           WEB_VERSION=$(jq -r '.version' crates/web-client/package.json)
           for pkg in node-sdk-darwin-arm64 node-sdk-darwin-x64 node-sdk-linux-x64-gnu; do
@@ -126,9 +128,9 @@ jobs:
             # Sync version with web-client
             jq --arg v "$WEB_VERSION" '.version = $v' "packages/${pkg}/package.json" > /tmp/pkg.json
             mv /tmp/pkg.json "packages/${pkg}/package.json"
-            echo "Packing @miden-sdk/${pkg}@${WEB_VERSION}..."
+            echo "Publishing @jeresalo/${pkg}@${WEB_VERSION}..."
             cd "packages/${pkg}"
-            npm pack
+            npm publish --tag test --access public
             cd ../..
           done
 
@@ -160,19 +162,26 @@ jobs:
             const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
             const v = pkg.version;
             pkg.optionalDependencies = {
-              '@miden-sdk/node-darwin-arm64': v,
-              '@miden-sdk/node-darwin-x64': v,
-              '@miden-sdk/node-linux-x64-gnu': v,
+              '@jeresalo/node-darwin-arm64': v,
+              '@jeresalo/node-darwin-x64': v,
+              '@jeresalo/node-linux-x64-gnu': v,
             };
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
             console.log('Injected optionalDependencies with version ' + v);
           "
 
-      - name: Pack web-client (fork dry-run)
+      - name: Publish web-client to npm
         if: needs.check-version.outputs.should_publish_web == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd crates/web-client
-          npm pack
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = '@jeresalo/miden-sdk';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --tag test --access public
 
       # ── Build and publish react-sdk ──
       - name: Install & build react-sdk
@@ -182,11 +191,18 @@ jobs:
           yarn install
           yarn build
 
-      - name: Pack react-sdk (fork dry-run)
+      - name: Publish react-sdk to npm
         if: needs.check-version.outputs.should_publish_react == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd packages/react-sdk
-          npm pack
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = '@jeresalo/react';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --tag test --access public
 
       # ── Build and publish vite-plugin ──
       - name: Install & build vite-plugin
@@ -196,23 +212,18 @@ jobs:
           yarn install
           yarn build
 
-      - name: Pack vite-plugin (fork dry-run)
+      - name: Publish vite-plugin to npm
         if: needs.check-version.outputs.should_publish_vite == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_WEBCLIENT_TOKEN }}
         run: |
           cd packages/vite-plugin
-          npm pack
-
-      # ── Upload all packed tarballs for inspection ──
-      - name: Upload packed tarballs
-        uses: actions/upload-artifact@v4
-        with:
-          name: fork-dry-run-tarballs
-          path: |
-            packages/node-sdk-*/miden-sdk-*.tgz
-            crates/web-client/miden-sdk-*.tgz
-            packages/react-sdk/miden-sdk-*.tgz
-            packages/vite-plugin/miden-sdk-*.tgz
-          if-no-files-found: warn
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = '@jeresalo/vite-plugin';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --tag test --access public
 
       # ── Status ──
       - name: Done (web-client)
